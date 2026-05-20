@@ -439,8 +439,8 @@ Temizlenmis veri ve Streamlit projesi ZIP olarak hazirlanmistir.
             n = min(len(num_cols[:4]), 4)
             lines.append(f"_mc = st.columns({n})")
             for i, col in enumerate(num_cols[:n]):
-                s = col.replace("'", "\'")
-                metric_str = "_mc[" + str(i) + "].metric('" + s + "', f\"{df['" + s + "'].mean():.2f}}\")" 
+                col_safe = col.replace("'", "\'")
+                lines.append(f"_mc[{i}].metric('{col_safe}', str(round(df['{col_safe}'].mean(), 2)))")
                 lines.append(metric_str)
 
         lines += ["", "st.divider()", "", "# --- Grafikler ---"]
@@ -653,140 +653,124 @@ class StreamlitGeneratorWorker(QThread):
 
     def run(self):
         try:
-            cols = list(self.df.columns)
             num_cols = list(self.df.select_dtypes(include=[np.number]).columns)
             cat_cols = list(self.df.select_dtypes(include=['object']).columns)
             date_cols = list(self.df.select_dtypes(include=['datetime64']).columns)
 
-            code = self._generate_template(cols, num_cols, cat_cols, date_cols)
+            code = self._generate_app(num_cols, cat_cols, date_cols)
 
             path = Path(self.project_path)
             path.mkdir(parents=True, exist_ok=True)
             (path / "data").mkdir(exist_ok=True)
-
             (path / "app.py").write_text(code, encoding="utf-8")
-            (path / "requirements.txt").write_text("streamlit>=1.28.0\npandas>=1.5.0\nplotly>=5.15.0\nopenpyxl>=3.0.0\nnumpy>=1.24.0\n")
+            (path / "requirements.txt").write_text(
+                "streamlit>=1.28.0\npandas>=1.5.0\nplotly>=5.15.0\nopenpyxl>=3.0.0\nnumpy>=1.24.0\n")
             self.df.to_excel(str(path / "data" / "cleaned_data.xlsx"), index=False)
-            (path / "README.md").write_text(f"# DataWizard Dashboard\n\n```bash\npip install -r requirements.txt\nstreamlit run app.py\n```\n\nSatir: {len(self.df)} | Kolon: {len(self.df.columns)}\n", encoding="utf-8")
-
             self.finished.emit(str(path))
-
         except Exception as e:
             self.error.emit(str(e))
 
-    def _generate_template(self, cols, num_cols, cat_cols, date_cols):
+    def _generate_app(self, num_cols, cat_cols, date_cols):
+        """Produce a clean, no-indent top-level app.py"""
         charts = self.chart_types
-
-        filter_lines = []
+        df = self.df
+        lines = [
+            "import streamlit as st",
+            "import pandas as pd",
+            "import numpy as np",
+            "import plotly.express as px",
+            "",
+            "st.set_page_config(page_title='DataWizard Dashboard', page_icon='\u26a1', layout='wide')",
+            "",
+            "@st.cache_data",
+            "def load_data():",
+            "    try:",
+            "        return pd.read_excel('data/cleaned_data.xlsx')",
+            "    except Exception:",
+            "        return pd.read_csv('data/cleaned_data.csv')",
+            "",
+            "df = load_data()",
+            "",
+            "st.sidebar.title('Filtreler')",
+            f"st.sidebar.markdown('**Toplam Kayit:** {len(df):,}')",
+            "st.sidebar.divider()",
+        ]
         for i, col in enumerate(cat_cols[:4]):
-            s = col.replace("'", "\\'")
-            filter_lines.append(f"    u{i} = sorted(df['{s}'].dropna().unique().tolist())")
-            filter_lines.append(f"    s{i} = st.sidebar.multiselect('{s}', u{i}, default=u{i})")
-            filter_lines.append(f"    df = df[df['{s}'].isin(s{i})] if s{i} else df")
-        filter_code = "\n".join(filter_lines)
-
-        metric_lines = []
-        mcols = num_cols[:4]
-        if mcols:
-            metric_lines.append(f"    mc = st.columns({len(mcols)})")
-            for i, col in enumerate(mcols):
-                s = col.replace("'", "\\'")
-                metric_lines.append(f"    mc[{i}].metric('{s}', f\"{{df['{s}'].mean():.2f}}\", help='Ortalama')")
-        metric_code = "\n".join(metric_lines)
-
-        chart_lines = []
-
-        if 'bar' in charts and cat_cols and num_cols:
-            c, n = cat_cols[0].replace("'", "\\'"), num_cols[0].replace("'", "\\'")
-            chart_lines.append(f"    st.subheader('Bar Grafik')")
-            chart_lines.append(f"    bd = df.groupby('{c}')['{n}'].mean().reset_index()")
-            chart_lines.append(f"    fig = px.bar(bd, x='{c}', y='{n}', color='{n}', color_continuous_scale='Blues', title='{c} Bazinda Ort. {n}')")
-            chart_lines.append(f"    st.plotly_chart(fig, use_container_width=True)")
-
-        if 'line' in charts and num_cols:
+            s = col.replace("'", "\'")
+            lines.append(f"_u{i} = sorted(df['{s}'].dropna().unique().tolist())")
+            lines.append(f"_s{i} = st.sidebar.multiselect('{s}', _u{i}, default=_u{i})")
+            lines.append(f"df = df[df['{s}'].isin(_s{i})] if _s{i} else df")
+        lines += [
+            "",
+            "st.title('\u26a1 DataWizard Dashboard')",
+            f"st.caption('{len(df):,} kayit')",
+            "st.divider()",
+        ]
+        if num_cols:
+            n = min(len(num_cols), 4)
+            lines.append(f"_mc = st.columns({n})")
+            for i, col in enumerate(num_cols[:n]):
+                col_safe = col.replace("'", "\'")
+                lines.append(f"_mc[{i}].metric('{col_safe}', str(round(df['{col_safe}'].mean(), 2)))")
+        lines += ["", "st.divider()", ""]
+        if "bar" in charts and cat_cols and num_cols:
+            c, n = cat_cols[0].replace("'", "\'"), num_cols[0].replace("'", "\'")
+            lines += [
+                "st.subheader('Bar Grafik')",
+                f"_bd = df.groupby('{c}')['{n}'].mean().reset_index()",
+                f"st.plotly_chart(px.bar(_bd, x='{c}', y='{n}', color='{n}', color_continuous_scale='Blues'), use_container_width=True)",
+            ]
+        if "line" in charts and num_cols:
+            lines.append("st.subheader('Cizgi Grafik')")
             if date_cols:
-                d, n = date_cols[0].replace("'", "\\'"), num_cols[0].replace("'", "\\'")
-                chart_lines.append(f"    st.subheader('Cizgi Grafik')")
-                chart_lines.append(f"    fig2 = px.line(df.sort_values('{d}'), x='{d}', y='{n}', title='{n} Zaman Serisi')")
-                chart_lines.append(f"    st.plotly_chart(fig2, use_container_width=True)")
-            elif len(num_cols) >= 2:
-                n = num_cols[0].replace("'", "\\'")
-                chart_lines.append(f"    st.subheader('Cizgi Grafik')")
-                chart_lines.append(f"    fig2 = px.line(df.reset_index(), x='index', y='{n}', title='{n} Trend')")
-                chart_lines.append(f"    st.plotly_chart(fig2, use_container_width=True)")
+                d, n = date_cols[0].replace("'", "\'"), num_cols[0].replace("'", "\'")
+                lines.append(f"st.plotly_chart(px.line(df.sort_values('{d}'), x='{d}', y='{n}'), use_container_width=True)")
+            else:
+                n = num_cols[0].replace("'", "\'")
+                lines.append(f"st.plotly_chart(px.line(df.reset_index(), x='index', y='{n}'), use_container_width=True)")
+        if "scatter" in charts and len(num_cols) >= 2:
+            n1, n2 = num_cols[0].replace("'", "\'"), num_cols[1].replace("'", "\'")
+            carg = f", color='{cat_cols[0]}'" if cat_cols else ""
+            lines += [
+                "st.subheader('Scatter Plot')",
+                f"st.plotly_chart(px.scatter(df, x='{n1}', y='{n2}'{carg}, opacity=0.7), use_container_width=True)",
+            ]
+        if "pie" in charts and cat_cols:
+            c = cat_cols[0].replace("'", "\'")
+            lines += [
+                "st.subheader('Pasta Grafik')",
+                f"_pie = df['{c}'].value_counts().reset_index()",
+                f"_pie.columns = ['{c}', 'Adet']",
+                f"st.plotly_chart(px.pie(_pie, names='{c}', values='Adet'), use_container_width=True)",
+            ]
+        if "histogram" in charts and num_cols:
+            n = num_cols[0].replace("'", "\'")
+            lines += [
+                "st.subheader('Histogram')",
+                f"st.plotly_chart(px.histogram(df, x='{n}', nbins=30, color_discrete_sequence=['#3b82f6']), use_container_width=True)",
+            ]
+        if "heatmap" in charts and len(num_cols) >= 2:
+            hc = str(num_cols[:8])
+            lines += [
+                "st.subheader('Korelasyon Isi Haritasi')",
+                f"_corr = df[{hc}].corr()",
+                "st.plotly_chart(px.imshow(_corr, text_auto=True, color_continuous_scale='RdBu_r'), use_container_width=True)",
+            ]
+        if "box" in charts and num_cols:
+            n = num_cols[0].replace("'", "\'")
+            carg = f", color='{cat_cols[0]}'" if cat_cols else ""
+            lines += [
+                "st.subheader('Box Plot')",
+                f"st.plotly_chart(px.box(df, y='{n}'{carg}), use_container_width=True)",
+            ]
+        lines += [
+            "",
+            "with st.expander('Ham Veriyi Goster'):",
+            "    st.dataframe(df, use_container_width=True)",
+            "    st.download_button('CSV Indir', df.to_csv(index=False).encode('utf-8-sig'), 'veri.csv', 'text/csv')",
+        ]
+        return "\n".join(lines)
 
-        if 'scatter' in charts and len(num_cols) >= 2:
-            n1, n2 = num_cols[0].replace("'", "\\'"), num_cols[1].replace("'", "\\'")
-            carg = f"color='{cat_cols[0]}'" if cat_cols else ""
-            chart_lines.append(f"    st.subheader('Scatter Plot')")
-            chart_lines.append(f"    fig3 = px.scatter(df, x='{n1}', y='{n2}', {carg}, opacity=0.7, title='{n1} vs {n2}')")
-            chart_lines.append(f"    st.plotly_chart(fig3, use_container_width=True)")
-
-        if 'pie' in charts and cat_cols:
-            c = cat_cols[0].replace("'", "\\'")
-            chart_lines.append(f"    st.subheader('Pasta Grafik')")
-            chart_lines.append(f"    pd_data = df['{c}'].value_counts().reset_index()")
-            chart_lines.append(f"    pd_data.columns = ['{c}', 'Adet']")
-            chart_lines.append(f"    fig4 = px.pie(pd_data, names='{c}', values='Adet', title='{c} Dagilimi')")
-            chart_lines.append(f"    st.plotly_chart(fig4, use_container_width=True)")
-
-        if 'histogram' in charts and num_cols:
-            n = num_cols[0].replace("'", "\\'")
-            chart_lines.append(f"    st.subheader('Histogram')")
-            chart_lines.append(f"    fig5 = px.histogram(df, x='{n}', nbins=30, color_discrete_sequence=['#3b82f6'], title='{n} Dagilimi')")
-            chart_lines.append(f"    st.plotly_chart(fig5, use_container_width=True)")
-
-        if 'heatmap' in charts and len(num_cols) >= 2:
-            hcols = str(num_cols[:8])
-            chart_lines.append(f"    st.subheader('Korelasyon Isi Haritasi')")
-            chart_lines.append(f"    corr = df[{hcols}].corr()")
-            chart_lines.append(f"    fig6 = px.imshow(corr, text_auto=True, color_continuous_scale='RdBu_r', title='Korelasyon Matrisi')")
-            chart_lines.append(f"    st.plotly_chart(fig6, use_container_width=True)")
-
-        if 'box' in charts and num_cols:
-            n = num_cols[0].replace("'", "\\'")
-            carg = f"color='{cat_cols[0]}'" if cat_cols else ""
-            chart_lines.append(f"    st.subheader('Box Plot')")
-            chart_lines.append(f"    fig7 = px.box(df, y='{n}', {carg}, title='{n} Istatistiksel Ozet')")
-            chart_lines.append(f"    st.plotly_chart(fig7, use_container_width=True)")
-
-        chart_code = "\n".join(chart_lines)
-
-        return f'''import streamlit as st
-import pandas as pd
-import numpy as np
-import plotly.express as px
-
-st.set_page_config(page_title="DataWizard Dashboard", page_icon="{{chr(9889)}}", layout="wide")
-
-@st.cache_data
-def load_data():
-    try:
-        return pd.read_excel("data/cleaned_data.xlsx")
-    except Exception:
-        return pd.read_csv("data/cleaned_data.csv")
-
-df = load_data()
-
-st.sidebar.title("Filtreler")
-st.sidebar.markdown(f"**Toplam Kayit:** {{len(df):,}}")
-st.sidebar.divider()
-{filter_code}
-
-st.title("DataWizard Dashboard")
-st.caption(f"{{len(df):,}} kayit gosteriliyor")
-st.divider()
-
-{metric_code}
-st.divider()
-
-{chart_code}
-
-with st.expander("Ham Veriyi Goster"):
-    st.dataframe(df, use_container_width=True)
-    csv = df.to_csv(index=False).encode("utf-8-sig")
-    st.download_button("CSV Indir", csv, "veri.csv", "text/csv")
-'''
 
 class SettingsDialog(QDialog):
     def __init__(self, parent=None, api_key=""):
